@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   refresh:
@@ -50,3 +51,10 @@ jobs:
           git add -A
           git diff --cached --quiet && echo "already current" || git commit -m "chore: refresh zapret bundle"
           git push
+
+      # Pushes made with GITHUB_TOKEN do not start other workflows.
+      - name: Trigger build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fork-build.yml --ref main

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   merge:
@@ -24,3 +25,10 @@ jobs:
           git fetch upstream main
           git merge --no-edit upstream/main
           git push
+
+      # Pushes made with GITHUB_TOKEN do not start other workflows.
+      - name: Trigger build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fork-build.yml --ref main

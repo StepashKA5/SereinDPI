@@ -267,7 +267,6 @@ fn package() -> Result<(), String> {
 	let arguments = [
 		"build",
 		"--release",
-		"--locked",
 		"-p",
 		"serein",
 		"--no-default-features",
