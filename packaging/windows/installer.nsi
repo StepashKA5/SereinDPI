@@ -187,6 +187,10 @@ Section "MainSection" SEC01
 
   ; Copy all package payload files
   File /r /x install-notifications.ps1 /x setup.ps1 "${DIST_DIR}\*.*"
+
+  ; Register the hidden DPI-bypass helper task once, elevated, during install.
+  ; End users never run a script by hand: this is the only UAC prompt.
+  ExecShell "runas" '"$INSTDIR\${APP_EXE}" --zapret-install-task' SW_HIDE
   ; Remove legacy installer utilities when upgrading an existing installation.
   Delete "$INSTDIR\install-notifications.ps1"
   Delete "$INSTDIR\setup.ps1"

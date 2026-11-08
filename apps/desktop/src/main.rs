@@ -18,6 +18,7 @@ mod credentials;
 #[cfg(feature = "demo")]
 mod dm_demo;
 mod downloads;
+mod dpi_bypass;
 mod emoji_upload;
 mod extension_app;
 mod extension_bridge;
@@ -77,6 +78,13 @@ use zeroize::Zeroizing;
 
 /// Run explicit offline checks before native startup, or launch the configured desktop client.
 fn main() -> eframe::Result {
+	if std::env::args().any(|arg| arg == "--zapret-install-task") {
+		// One-shot elevated setup: register the hidden helper task and exit.
+		std::process::exit(match dpi_bypass::install_task() {
+			Ok(()) => 0,
+			Err(_) => 1,
+		});
+	}
 	let camera_gateway_check = std::env::args().any(|arg| arg == "--demo-check-camera-gateway");
 	let camera_gateway_capture = std::env::args().any(|arg| {
 		arg == "--demo-camera-gateway-evidence"
@@ -1073,6 +1081,7 @@ struct Desktop {
 	font_picker: Option<std::sync::mpsc::Receiver<font_import::Selected>>,
 	font_families: Option<std::sync::mpsc::Receiver<Vec<String>>>,
 	updater: updater::Updater,
+	dpi_bypass: dpi_bypass::DpiBypass,
 	game_activity: toggle_setting::Settings,
 	game_mentions: game_mentions::Loader,
 	registered_games: registered_games::Registered,
@@ -2444,6 +2453,7 @@ impl Desktop {
 			font_picker: None,
 			font_families: None,
 			updater: updater::Updater::new(demo),
+			dpi_bypass: dpi_bypass::DpiBypass::default(),
 			game_activity,
 			game_mentions: Default::default(),
 			registered_games: if demo {
@@ -5787,6 +5797,12 @@ impl eframe::App for Desktop {
 			self.tray_window.quit(ctx);
 		}
 		self.state.expire_interaction(std::time::Instant::now());
+		self.dpi_bypass.sync(
+			ctx,
+			&self.runtime,
+			&mut self.messaging,
+			self.fixture_only || self.state.demo,
+		);
 		if self.state.interactions.busy() {
 			ctx.request_repaint_after(Duration::from_millis(250));
 		}

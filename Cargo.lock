@@ -6406,6 +6406,7 @@ dependencies = [
  "ui",
  "url",
  "winit",
+ "zapret",
  "zeroize",
  "zip",
 ]
@@ -9198,6 +9199,13 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "synstructure",
+]
+
+[[package]]
+name = "zapret"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

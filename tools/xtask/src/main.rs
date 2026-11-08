@@ -1,7 +1,20 @@
 use std::{
-	path::PathBuf,
+	path::{Path, PathBuf},
 	process::{Command, ExitCode, Stdio},
 };
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+	std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+	for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+		let entry = entry.map_err(|e| e.to_string())?;
+		let target = to.join(entry.file_name());
+		if entry.path().is_dir() {
+			copy_dir(&entry.path(), &target)?;
+		} else {
+			std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+		}
+	}
+	Ok(())
+}
 fn run(args: &[&str]) -> Result<(), String> {
 	run_tool("cargo", args)
 }
@@ -280,6 +293,14 @@ fn package() -> Result<(), String> {
 		std::fs::copy(
 			"packaging/windows/install-notifications.ps1",
 			root.join("install-notifications.ps1"),
+		)
+		.map_err(|e| e.to_string())?;
+		// Bundled DPI bypass: ship the binaries next to the client and the
+		// one-time task registration script beside them.
+		copy_dir(Path::new("packaging/windows/zapret"), &root.join("zapret"))?;
+		std::fs::copy(
+			"packaging/windows/setup-zapret.ps1",
+			root.join("setup-zapret.ps1"),
 		)
 		.map_err(|e| e.to_string())?;
 	}

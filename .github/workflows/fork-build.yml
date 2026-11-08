@@ -1,0 +1,55 @@
+name: Fork build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Build installer
+        run: cargo xtask package
+
+      - name: Pack portable build
+        shell: pwsh
+        run: Compress-Archive -Path "dist/*" -DestinationPath "dist/serein-zapret-portable.zip"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: serein-zapret-windows-x64
+          path: |
+            dist-installer/*.exe
+            dist/serein-zapret-portable.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-installer/*.exe
+            dist/serein-zapret-portable.zip
+          generate_release_notes: true

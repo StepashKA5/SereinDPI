@@ -126,6 +126,7 @@ mod text_menu;
 mod thumbhash;
 #[cfg(feature = "demo")]
 pub use polls::debug_poll_check;
+pub mod dpi_bypass;
 mod timeline;
 #[cfg(test)]
 mod title_bar_tests;
@@ -551,6 +552,7 @@ pub struct MessagingUi {
 	/// Release channel and version shown in the title bar.
 	pub build: design::Build,
 	pub updates: updates::Updates,
+	pub dpi_bypass: dpi_bypass::DpiBypass,
 	pub updates_save_failed: bool,
 	/// The owner's diagnostic log level; the desktop host applies and persists it.
 	pub diagnostics_log: diagnostics::Level,

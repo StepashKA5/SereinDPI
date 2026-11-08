@@ -1,0 +1,52 @@
+name: Refresh zapret
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest Flowseal release
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+          if (-not $asset) { throw 'no zip asset in the latest release' }
+          $zip = Join-Path $env:RUNNER_TEMP 'zapret.zip'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'zapret') -Force
+          $root = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'zapret') -Directory | Select-Object -First 1
+          $dir = if ($root) { $root.FullName } else { Join-Path $env:RUNNER_TEMP 'zapret' }
+          if (-not (Test-Path (Join-Path $dir 'bin\winws.exe'))) { throw "winws.exe not found in $dir" }
+          "ZAPRET_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Regenerate strategy catalog
+        shell: pwsh
+        run: .\tools\gen-strategies.ps1 -ZapretDir "$env:ZAPRET_DIR" -OutFile "crates\zapret\data\strategies.json"
+
+      - name: Vendor binaries
+        shell: pwsh
+        run: |
+          $target = 'packaging\windows\zapret'
+          Remove-Item "$target\bin" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "$target\lists" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$target\bin", "$target\lists" | Out-Null
+          Copy-Item "$env:ZAPRET_DIR\bin\*" "$target\bin" -Recurse -Force
+          Copy-Item "$env:ZAPRET_DIR\lists\*.txt" "$target\lists" -Force
+
+      - name: Commit changes
+        shell: pwsh
+        run: |
+          git config user.name "serein-fork-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "already current" || git commit -m "chore: refresh zapret bundle"
+          git push

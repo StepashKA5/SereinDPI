@@ -36,10 +36,12 @@ enum Page {
 	Updates,
 	Extensions,
 	Themes,
+	/// Bundled DPI bypass: find a working strategy and connect it.
+	Dpi,
 }
 impl Page {
 	/// Every page in sidebar order; the narrow-window page picker lists them the same way.
-	const ALL: [Self; 15] = [
+	const ALL: [Self; 16] = [
 		Self::Account,
 		Self::Profile,
 		Self::MessagingPermissions,
@@ -55,6 +57,7 @@ impl Page {
 		Self::Updates,
 		Self::Themes,
 		Self::Extensions,
+		Self::Dpi,
 	];
 	/// Sidebar sections: account-level choices first, then how this app looks and behaves,
 	/// then community add-ons.
@@ -80,6 +83,7 @@ impl Page {
 				Self::LanguageTime,
 				Self::General,
 				Self::Updates,
+				Self::Dpi,
 			],
 		),
 		("section-customization", &[Self::Themes, Self::Extensions]),
@@ -101,6 +105,7 @@ impl Page {
 			Self::Updates => "page-updates",
 			Self::Extensions => "page-extensions",
 			Self::Themes => "page-themes",
+			Self::Dpi => "page-dpi-bypass",
 		}
 	}
 	fn label(self, language: Language) -> String {
@@ -123,6 +128,7 @@ impl Page {
 			Self::Updates => "description-updates",
 			Self::Extensions => "description-extensions",
 			Self::Themes => "description-themes",
+			Self::Dpi => "description-dpi-bypass",
 		}
 	}
 	fn description(self, language: Language) -> String {
@@ -165,6 +171,7 @@ impl Page {
 			}
 			Self::Extensions => "extensions plugins shop store catalog import community tools",
 			Self::Themes => "themes shop store catalog import community appearance colors",
+			Self::Dpi => "dpi bypass обход zapret winws censorship network discord",
 		};
 		keywords.contains(query)
 			|| self.label(language).to_lowercase().contains(query)
@@ -489,6 +496,7 @@ impl MessagingUi {
 									),
 									Page::Storage => self.storage_page(ui, state),
 									Page::Updates => self.update_settings(ui, state.demo),
+									Page::Dpi => self.dpi_bypass_settings(ui, state.demo),
 									Page::Keybinds => crate::keybinds::show(
 										ui,
 										&mut self.keybinds,
