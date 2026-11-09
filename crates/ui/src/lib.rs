@@ -453,6 +453,8 @@ pub struct MessagingUi {
 	pub external_upload: external_upload::ExternalUpload,
 	/// Transient problem and progress notices. Nothing here outlives its deadline.
 	pub toasts: toasts::Toasts,
+	/// Session generation and startup warnings already stated in a toast.
+	startup_warnings_toasted: (u64, model::account::Warnings),
 	pending_upload: Option<pending::Upload>,
 	pub clear_cache_requested: bool,
 	pub voice_available: bool,
@@ -1831,6 +1833,7 @@ impl MessagingUi {
 									&avatar,
 									state,
 									&member.user,
+									user_menu::Place::Open,
 									&mut self.profile,
 									&mut self.user_action,
 								);
@@ -1956,6 +1959,7 @@ impl MessagingUi {
 									&response,
 									state,
 									&member.user,
+									user_menu::Place::Open,
 									&mut self.profile,
 									&mut self.user_action,
 								);
@@ -2262,6 +2266,7 @@ impl MessagingUi {
 									&avatar,
 									state,
 									user,
+									user_menu::Place::Nowhere,
 									&mut self.profile,
 									&mut self.user_action,
 								);
@@ -2490,6 +2495,7 @@ impl MessagingUi {
 								&avatar,
 								state,
 								user,
+								user_menu::Place::Conversation(c.id),
 								&mut self.profile,
 								&mut self.user_action,
 								Some(shortcuts::ShortcutView::new(
@@ -4488,6 +4494,8 @@ impl MessagingUi {
 		}
 	}
 
+	/// Draws one frame of the signed-in client and returns the commands it produced for the
+	/// service layer.
 	pub fn show(&mut self, ui: &mut egui::Ui, state: &mut State) -> Vec<Command> {
 		self.avatars.cosmetics = self.cosmetics;
 		name_styles::set_enabled(self.cosmetics.name_styles);
@@ -4615,6 +4623,7 @@ impl MessagingUi {
 		let ctx = ui.ctx().clone();
 		user_menu::set_voice_available(&ctx, self.voice_available);
 		self.extensions.reset_theme_shortcut(&ctx);
+		self.extensions.context_menus(&ctx, state);
 		if self.extensions.has_result() {
 			self.settings.open = false;
 		}
@@ -4694,11 +4703,17 @@ impl MessagingUi {
 				Err(message) => state.status = message,
 			}
 		}
-		markdown::confirm_external_link(
+		let truncated = self.timeline.truncated_translation.is_some()
+			&& self.timeline.truncated_translation == self.timeline.browser_opening;
+		markdown::confirm_external_link_noting(
 			&ctx,
 			&mut self.timeline.browser_opening,
 			self.reading_preferences.confirm_external_links,
+			truncated,
 		);
+		if !truncated || self.timeline.browser_opening.is_none() {
+			self.timeline.truncated_translation = None;
+		}
 		markdown::confirm_external_link(
 			&ctx,
 			&mut self.timeline.opening,
@@ -4941,6 +4956,7 @@ impl MessagingUi {
 			self.search.focus_conversation(channel, state);
 		}
 		self.search.sync(&ctx, state, &mut commands);
+		self.search.extension_actions = self.extensions.message_actions();
 		let search_open =
 			self.search.results_visible(state) && state.selected.is_some() && !selected_voice;
 		let show_members = !selected_voice
@@ -5089,30 +5105,44 @@ impl MessagingUi {
 				if !warnings.presence {
 					self.friends.presence_warning_dismissed = None;
 				}
+				// Say once per connection what failed to load instead of keeping a banner up;
+				// a later category failing in the same session gets its own toast.
+				let (generation, toasted) = self.startup_warnings_toasted;
+				let toasted = if generation == state.generation {
+					toasted
+				} else {
+					Default::default()
+				};
 				let unavailable: Vec<_> = [
-					(warnings.read_state, "read status"),
-					(warnings.notifications, "notification settings"),
-					(warnings.sessions, "session status"),
-					(warnings.emojis, "some server emoji"),
-					(warnings.stickers, "some server stickers"),
-					(warnings.entries, "some malformed channels, DMs or contacts"),
+					(warnings.read_state && !toasted.read_state, "read status"),
+					(
+						warnings.notifications && !toasted.notifications,
+						"notification settings",
+					),
+					(warnings.sessions && !toasted.sessions, "session status"),
+					(warnings.emojis && !toasted.emojis, "some server emoji"),
+					(
+						warnings.stickers && !toasted.stickers,
+						"some server stickers",
+					),
+					(
+						warnings.entries && !toasted.entries,
+						"some channels or contacts",
+					),
 				]
 				.into_iter()
 				.filter_map(|(unavailable, label)| unavailable.then_some(label))
 				.collect();
 				if !unavailable.is_empty() {
-					egui::Frame::new()
-						.inner_margin(egui::Margin::symmetric(16, 6))
-						.show(ui, |ui| {
-							ui.colored_label(
-								colors.warning,
-								format!(
-									"Connected with some data unavailable: {}. Reconnect to retry.",
-									unavailable.join(", ")
-								),
-							);
-						});
+					self.toasts.push(
+						design::Level::Warning,
+						format!(
+							"Couldn't load {}. Reconnect to retry.",
+							unavailable.join(", ")
+						),
+					);
 				}
+				self.startup_warnings_toasted = (state.generation, warnings);
 				if state.selected.is_none() && self.guild.is_none() {
 					self.call_bar(ui, state, &mut commands, None);
 					self.timeline.download.show_status(ui);
@@ -5365,9 +5395,10 @@ impl MessagingUi {
 						{
 							commands.push(command);
 						}
-						if let Some((action, text)) = self.timeline.extension_request.take() {
+						if let Some((action, text, target)) = self.timeline.extension_request.take()
+						{
 							self.extensions
-								.invoke_message(action, text, state, ui.ctx());
+								.invoke_message(action, text, target, state, ui.ctx());
 						}
 						if let Some((message, anchor, trigger)) =
 							self.timeline.reaction_picker.take()
@@ -5566,6 +5597,10 @@ impl MessagingUi {
 		}
 		if let Some(link) = self.search.opening.take() {
 			self.timeline.opening = Some(link);
+		}
+		if let Some((action, text, target)) = self.search.extension_request.take() {
+			self.extensions
+				.invoke_message(action, text, target, state, &ctx);
 		}
 		if let Some(channel) = self.search.channel_reference.take() {
 			self.timeline.channel_reference = Some(channel);

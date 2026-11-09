@@ -589,6 +589,8 @@ impl Stored {
 	}
 }
 
+/// Rejects a job whose IDs, account or invocation fail the host's limits before it reaches
+/// the worker, so a malformed request never runs plugin code.
 fn validate_job(job: &Job) -> Result<(), String> {
 	match job {
 		Job::Invoke {
@@ -616,6 +618,18 @@ fn validate_job(job: &Job) -> Result<(), String> {
 					.action
 					.len()
 					.saturating_add(invocation.selected_message.as_ref().map_or(0, String::len))
+					.saturating_add(
+						invocation
+							.selected_message_ref
+							.as_ref()
+							.map_or(0, |reference| reference.bytes()),
+					)
+					.saturating_add(
+						invocation
+							.menu_target
+							.as_ref()
+							.map_or(0, |target| target.bytes()),
+					)
 					.saturating_add(invocation.composer.as_ref().map_or(0, String::len))
 					.saturating_add(invocation.storage.as_ref().map_or(0, String::len))
 					.saturating_add(event_bytes)
@@ -665,6 +679,8 @@ fn validate_job(job: &Job) -> Result<(), String> {
 	Ok(())
 }
 
+/// Runs one validated job on the worker thread and returns its event; the gate aborts work
+/// that a newer job or logout made stale.
 fn run(root: &Path, job: Job, gate: &Gate) -> Result<Event, String> {
 	gate.check()?;
 	match job {
@@ -824,6 +840,8 @@ fn run(root: &Path, job: Job, gate: &Gate) -> Result<Event, String> {
 				|| invocation.message_event.is_some()
 					&& !stored.grants.contains(&Capability::MessageEvents)
 				|| invocation.app_event.is_some() && !stored.grants.contains(&Capability::AppEvents)
+				|| invocation.menu_target.is_some()
+					&& !stored.grants.contains(&Capability::ContextMenus)
 			{
 				return Err("Plugin access was not granted".into());
 			}
