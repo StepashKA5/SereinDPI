@@ -23,6 +23,10 @@ const WINDOWS_FILES: &[&str] = &[
 	"source",
 	"install-notifications.ps1",
 	"setup.ps1",
+	// Fork-only DPI bypass: the update archive carries it, so both the archive
+	// check and the restart helper must treat it as package content.
+	"zapret",
+	"setup-zapret.ps1",
 ];
 
 pub(super) fn flatpak_session() -> bool {
