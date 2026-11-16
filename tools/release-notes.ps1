@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
   Build the Markdown changelog for a SereinDPI release.
@@ -16,7 +16,7 @@
   Version being released, for example 1.0.15 (the workflow sets $env:VERSION).
 
 .PARAMETER OutputPath
-  Where to write the Markdown file. Default: release-notes.md
+  Where to write the Markdown file. Default: target/release-notes.md
 
 .PARAMETER Repository
   Fork repository used for commit and compare links.
