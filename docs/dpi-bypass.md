@@ -92,8 +92,8 @@ cargo xtask package     # dist-installer\serein-<version>-setup.exe
 4. `packaging/windows/setup-zapret.ps1` — одноразовая регистрация задачи
    `SereinZapret` с `RunLevel Highest` (без UAC при последующих запусках).
 5. `packaging/windows/zapret/` — ассеты и `NOTICE.txt`; `cargo xtask package`
-   кладёт их в `dist/zapret` и `dist/setup-zapret.ps1`, откуда они попадают и в
-   установщик, и в портативный zip.
+   кладёт их в `dist/zapret` и `dist/setup-zapret.ps1`, откуда они попадают в
+   установщик и в пакет автообновления.
 
 ## Чего не хватает для «просто работает»
 
@@ -133,14 +133,6 @@ cargo xtask package     # dist-installer\serein-<version>-setup.exe
 - Публичный репозиторий с инструкциями Роскомнадзор может заблокировать по
   правилам о популяризации обхода — размещение на GitHub снижает риск, но не
   убирает его.
-
-## Портативная сборка
-
-`cargo xtask package` кладёт рядом с `serein.exe` папку `zapret\` и
-`setup-zapret.ps1`; CI дополнительно упаковывает `dist\*` в
-`serein-zapret-portable.zip`. Портативный вариант всё равно требует одного
-запуска `setup-zapret.ps1` от администратора: WinDivert без драйвера не
-работает, а задача планировщика — единственный способ потом не спрашивать UAC.
 
 ## Режимы, свежесть и тишина
 

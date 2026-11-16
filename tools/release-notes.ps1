@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   Build the Markdown changelog for a SereinDPI release.
@@ -201,7 +201,7 @@ if ($previousTag) {
 } else {
     $lines += ("**Полный список изменений:** [история коммитов](https://github.com/$Repository/commits/main)")
 }
-$lines += ('Установщик и портативная сборка — во вложениях релиза.')
+$lines += ('Установщик — во вложениях релиза.')
 
 $text = ($lines -join "`n") + "`n"
 $directory = Split-Path -Parent $OutputPath

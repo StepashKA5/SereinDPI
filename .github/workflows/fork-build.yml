@@ -48,9 +48,29 @@ jobs:
       - name: Build installer
         run: cargo xtask package
 
-      - name: Pack portable build
+      - name: Pack update archive
         shell: pwsh
-        run: Compress-Archive -Path "dist/*" -DestinationPath "dist/serein-zapret-portable.zip"
+        run: |
+          # The in-app updater downloads serein-<tag>-Windows-X64.zip and rejects
+          # backslash entry names, so build the ZIP with tar (bsdtar) rather than
+          # Compress-Archive. The installer is the only user-facing package.
+          $zip = Join-Path 'dist' "serein-v$env:VERSION-Windows-X64.zip"
+          $items = @(Get-ChildItem 'dist' | Select-Object -ExpandProperty Name)
+          & tar.exe -a -c -f $zip -C dist @items
+          if ($LASTEXITCODE -ne 0) { throw 'tar failed to create the update ZIP' }
+          $bad = @(& tar.exe -tf $zip | Where-Object { $_ -match '\\' -or $_ -match '^\./' })
+          if ($bad.Count -gt 0) { throw "invalid ZIP entries: $($bad -join ', ')" }
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem 'dist\*.zip', 'dist-installer\*.exe')
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $path = Join-Path (Get-Location) 'dist\SHA256SUMS.txt'
+          [IO.File]::WriteAllText($path, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
@@ -58,7 +78,8 @@ jobs:
           name: serein-zapret-${{ env.VERSION }}
           path: |
             dist-installer/*.exe
-            dist/serein-zapret-portable.zip
+            dist/serein-v*-Windows-X64.zip
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Generate changelog
@@ -79,4 +100,5 @@ jobs:
           make_latest: true
           files: |
             dist-installer/*.exe
-            dist/serein-zapret-portable.zip
+            dist/serein-v*-Windows-X64.zip
+            dist/SHA256SUMS.txt

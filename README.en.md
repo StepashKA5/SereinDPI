@@ -32,8 +32,6 @@ A strategy counts as working when at least two of three Discord endpoints answer
 
 Installer: `serein-<version>-setup.exe`. It installs into the user profile and asks for administrator rights once, to register the scheduled tasks.
 
-Portable build: unpack the archive and run `serein.exe`. On the first launch the app requests elevation itself and registers the tasks.
-
 The login is taken from the Windows Credential Manager, so an existing installation carries over.
 
 ## Updates
@@ -42,7 +40,7 @@ The login is taken from the Windows Credential Manager, so an existing installat
 
 `.github/workflows/refresh-zapret.yml` downloads the latest Flowseal release once a day, regenerates the strategy catalog and refreshes the binaries in `packaging/windows/zapret`.
 
-`.github/workflows/fork-build.yml` builds the installer and the portable archive on every push; releases are published on `v*` tags.
+`.github/workflows/fork-build.yml` builds the installer on every push; releases are published on `v*` tags.
 
 ## Licenses
 
