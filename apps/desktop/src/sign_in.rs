@@ -434,7 +434,35 @@ impl Desktop {
 							p.accent,
 						);
 					}
-					ui.add_space(24.0);
+					// The bypass starts in the background during this same frame; show what it
+					// is doing so a slow launch is not a mystery.
+					ui.add_space(10.0);
+					if self.messaging.dpi_bypass.supported {
+						let bypass = &self.messaging.dpi_bypass;
+						// The live status already names the chosen strategy when known, so
+						// never repeat the id here; only fall back while nothing is written.
+						let status = if bypass.status.is_empty() {
+							"Проверяю обход DPI…".to_owned()
+						} else {
+							bypass.status.clone()
+						};
+						let text =
+							format!("{}: {}", ui::i18n::translate("dpi-bypass-title"), status);
+						let color = if bypass.connected {
+							p.accent
+						} else if bypass.busy {
+							p.muted
+						} else {
+							p.warning
+						};
+						ui.add(
+							egui::Label::new(egui::RichText::new(text).size(12.5).color(color))
+								.wrap(),
+						);
+						ui.add_space(18.0);
+					} else {
+						ui.add_space(14.0);
+					}
 					ui.allocate_ui_with_layout(
 						egui::vec2(220.0, 0.0),
 						egui::Layout::top_down(egui::Align::Center),

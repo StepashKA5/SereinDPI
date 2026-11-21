@@ -2650,7 +2650,7 @@ impl Desktop {
 			.ok()
 			.map(|menu| (menu, ui::i18n::Language::System))
 		};
-		Ok(Self {
+		let mut this = Self {
 			proxy_auth: proxy_auth::Authentication::default(),
 			api_proxy: tokio::sync::watch::channel(None).0,
 			extensions: extension_bridge::Bridge::default(),
@@ -2799,7 +2799,17 @@ impl Desktop {
 			#[cfg(feature = "demo")]
 			synthetic_id,
 			token_input: Zeroizing::new(String::new()),
-		})
+		};
+		// Started here, not on the first pass: a launch that begins minimized or
+		// hidden in the tray may paint no frame for a while, but Discord is still
+		// dialed and still needs the bypass.
+		this.dpi_bypass.prepare(
+			&cc.egui_ctx,
+			&this.runtime,
+			&mut this.messaging,
+			this.fixture_only,
+		);
+		Ok(this)
 	}
 }
 
@@ -6198,6 +6208,14 @@ impl eframe::App for Desktop {
 		};
 		self.frame_metrics.begin(ctx, search_focused);
 		self.startup.sync(
+			ctx,
+			&self.runtime,
+			&mut self.messaging,
+			self.fixture_only || self.state.demo,
+		);
+		// Normally already started in `new`; this keeps a hidden or minimized launch
+		// covered too, and never blocks the pass.
+		self.dpi_bypass.prepare(
 			ctx,
 			&self.runtime,
 			&mut self.messaging,

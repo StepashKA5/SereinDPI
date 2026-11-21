@@ -1,8 +1,11 @@
 //! Off-thread owner of the bundled DPI bypass.
 //!
 //! The UI only flips request flags; everything that touches the filesystem,
-//! `schtasks` or the network happens here, on a blocking worker.
+//! `schtasks` or the network happens here, on a blocking worker. That includes
+//! the launch probe: shelling out to `tasklist`/`sc`/`schtasks` while the first
+//! frame is being drawn is what made the launch screen appear late.
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -10,36 +13,66 @@ use std::time::Duration;
 
 use zapret::{Catalog, Paths, Service, ServiceState, render};
 
-/// Scheduled task registered by `setup-zapret.ps1`; runs `run.ps1` elevated
+/// Scheduled task registered by `setup-zapret.ps1`; runs `run.vbs` elevated
 /// without a UAC prompt.
 const TASK_NAME: &str = "SereinZapret";
 /// Companion task: `schtasks /end` kills PowerShell but not its `winws` child,
 /// so stopping the bypass goes through this second hidden task.
 const STOP_TASK: &str = "SereinZapretStop";
+/// `winws` needs a moment to load WinDivert. Polling every 250 ms keeps the
+/// launch short instead of the old 500 ms × 10 wait before the first probe.
+const WINWS_START_STEP: Duration = Duration::from_millis(250);
+const WINWS_START_TRIES: u32 = 12;
+/// The elevated installer registers the task within a second or two, but a cold
+/// start with an antivirus scan can take much longer; only a dismissed UAC
+/// prompt wastes the whole budget.
+const INSTALL_STEP: Duration = Duration::from_millis(500);
+const INSTALL_TRIES: u32 = 20;
+/// How long a strategy switch waits for the old `winws` to die. The stop task
+/// is asynchronous, and starting the next `winws` too early lets its delayed
+/// killer take the new process down.
+const STOP_STEP: Duration = Duration::from_millis(150);
+const STOP_TRIES: u32 = 10;
 
 #[derive(Default)]
 pub struct DpiBypass {
 	job: Option<Job>,
-	initialized: bool,
-	elevating: bool,
+	prepared: bool,
+	/// Elevated one-shot installer (`serein.exe --zapret-install-task`) still running.
+	elevating: Option<Child>,
+	/// The elevated setup already failed once, so this run does not prompt again.
+	install_failed: bool,
+	/// The helper task was just registered: start the bypass without another frame.
+	relaunch: bool,
+	/// The launch worker found no helper task and asked for the elevated setup.
+	install_requested: bool,
 }
 
 struct Job {
-	receiver: Receiver<Result<Outcome, String>>,
+	receiver: Receiver<Outcome>,
 	progress: Arc<AtomicU64>,
 	total: u64,
 }
 
 enum Outcome {
+	/// `winws` or an installed zapret service is already filtering traffic.
+	AlreadyUp,
+	/// The helper task is missing and only the elevated installer can add it.
+	NeedsInstall,
+	/// The elevated installer finished; `true` when the task is now registered.
+	Installed(bool),
 	Scanned {
 		alive: Option<String>,
 		results: Vec<(String, bool)>,
 	},
 	Connected(bool),
+	Failed(String),
 }
 
 impl DpiBypass {
-	pub fn sync(
+	/// Starts the bypass as early as possible in the first logic pass, before the
+	/// saved login is polled and the gateway connection is opened.
+	pub fn prepare(
 		&mut self,
 		ctx: &eframe::egui::Context,
 		runtime: &tokio::runtime::Runtime,
@@ -50,50 +83,54 @@ impl DpiBypass {
 			view.dpi_bypass.supported = false;
 			return;
 		}
+		if self.prepared {
+			return;
+		}
+		self.prepared = true;
 		let available = cfg!(windows) && winws_path().is_some();
 		view.dpi_bypass.supported = available;
 		if !available {
 			return;
 		}
-		if !self.initialized {
-			self.initialized = true;
-			view.dpi_bypass.strategy = read_state_file();
-			view.dpi_bypass.selected = view.dpi_bypass.strategy.clone();
-			// A bypass may already be up as our task, as an installed zapret
-			// service, or as a hand-started winws: do not fight it.
-			view.dpi_bypass.connected = winws_running() || service_running();
-			if view.dpi_bypass.connected {
-				view.dpi_bypass.status = "Обход уже запущен.".to_owned();
-			} else if !task_registered() || !state_dir().join("run.vbs").exists() {
-				// No manual scripts for end users: raise the UAC prompt ourselves
-				// and let the elevated process register the helper task.
-				view.dpi_bypass.status =
-					"Подтверди запрос администратора — регистрирую обход…".to_owned();
-				if !self.elevating {
-					self.elevating = true;
-					elevate_install();
-				}
-			} else {
-				// Connect automatically on launch instead of waiting for a click.
-				view.dpi_bypass.status = "Ищу рабочий обход…".to_owned();
-				view.dpi_bypass.scan_requested = true;
-			}
-		}
+		let saved = read_state_file();
+		view.dpi_bypass.selected = saved.clone();
+		view.dpi_bypass.strategy = saved;
+		self.begin_launch(ctx, runtime, view);
+	}
 
+	pub fn sync(
+		&mut self,
+		ctx: &eframe::egui::Context,
+		runtime: &tokio::runtime::Runtime,
+		view: &mut ui::MessagingUi,
+		demo: bool,
+	) {
+		if demo || !view.dpi_bypass.supported {
+			return;
+		}
 		self.poll(view);
-
-		if self.elevating && task_registered() {
-			self.elevating = false;
-			view.dpi_bypass.status = "Ищу рабочий обход…".to_owned();
-			view.dpi_bypass.scan_requested = true;
-		}
-
+		self.poll_elevation(ctx, runtime, view);
 		if self.job.is_some() {
+			return;
+		}
+		if std::mem::take(&mut self.relaunch) {
+			self.begin_launch(ctx, runtime, view);
+			return;
+		}
+		if std::mem::take(&mut self.install_requested) {
+			self.raise_install(ctx, view);
 			return;
 		}
 		let scan = std::mem::take(&mut view.dpi_bypass.scan_requested);
 		let toggle = std::mem::take(&mut view.dpi_bypass.toggle_requested);
 		if !scan && !toggle {
+			return;
+		}
+		if self.install_failed {
+			// A retry after a declined prompt re-checks the helper task instead of
+			// failing the same way again.
+			self.install_failed = false;
+			self.begin_launch(ctx, runtime, view);
 			return;
 		}
 		if scan {
@@ -109,21 +146,56 @@ impl DpiBypass {
 		view.dpi_bypass.progress = (job.total > 0).then(|| {
 			(job.progress.load(Ordering::Relaxed) as f32 / job.total as f32).clamp(0.0, 1.0)
 		});
-		let result = match job.receiver.try_recv() {
-			Ok(result) => result,
-			Err(TryRecvError::Empty) => return,
-			Err(TryRecvError::Disconnected) => {
-				Err("Фоновый процесс обхода остановился.".to_owned())
+		// The worker may report progress and a final outcome on the same channel.
+		let mut outcomes = Vec::new();
+		let finished = loop {
+			match job.receiver.try_recv() {
+				Ok(outcome) => outcomes.push(outcome),
+				Err(TryRecvError::Empty) => break false,
+				Err(TryRecvError::Disconnected) => break true,
 			}
 		};
-		self.job = None;
-		view.dpi_bypass.busy = false;
-		view.dpi_bypass.progress = None;
-		match result {
-			Ok(Outcome::Scanned {
+		for outcome in outcomes {
+			self.apply(outcome, view);
+		}
+		if finished {
+			self.job = None;
+			view.dpi_bypass.busy = false;
+			view.dpi_bypass.progress = None;
+		}
+	}
+
+	fn apply(&mut self, outcome: Outcome, view: &mut ui::MessagingUi) {
+		match outcome {
+			Outcome::AlreadyUp => {
+				view.dpi_bypass.connected = true;
+				view.dpi_bypass.status = "Обход уже запущен.".to_owned();
+			}
+			Outcome::NeedsInstall => {
+				if self.install_failed {
+					view.dpi_bypass.status =
+						"Обход не запущен: задача не зарегистрирована. Запусти установщик от администратора."
+							.to_owned();
+				} else {
+					view.dpi_bypass.status =
+						"Подтверди запрос администратора — регистрирую обход…".to_owned();
+					self.install_requested = true;
+				}
+			}
+			Outcome::Installed(true) => {
+				view.dpi_bypass.status = "Запускаю обход DPI…".to_owned();
+				self.relaunch = true;
+			}
+			Outcome::Installed(false) => {
+				self.install_failed = true;
+				view.dpi_bypass.status =
+					"Не удалось зарегистрировать задачу обхода. Запусти установщик от администратора."
+						.to_owned();
+			}
+			Outcome::Scanned {
 				alive: Some(id),
 				results,
-			}) => {
+			} => {
 				view.dpi_bypass.connected = true;
 				view.dpi_bypass.results = results;
 				view.dpi_bypass.strategy = Some(id.clone());
@@ -132,15 +204,15 @@ impl DpiBypass {
 				}
 				view.dpi_bypass.status = format!("Найден рабочий обход: {id}.");
 			}
-			Ok(Outcome::Scanned {
+			Outcome::Scanned {
 				alive: None,
 				results,
-			}) => {
+			} => {
 				view.dpi_bypass.results = results;
 				view.dpi_bypass.status =
 					"Ни одна стратегия не прошла проверку. Попробуйте позже.".to_owned();
 			}
-			Ok(Outcome::Connected(connected)) => {
+			Outcome::Connected(connected) => {
 				view.dpi_bypass.connected = connected;
 				view.dpi_bypass.status = if connected {
 					"Обход подключён.".to_owned()
@@ -148,8 +220,100 @@ impl DpiBypass {
 					"Обход отключён.".to_owned()
 				};
 			}
-			Err(error) => view.dpi_bypass.status = error,
+			Outcome::Failed(error) => view.dpi_bypass.status = error,
 		}
+	}
+
+	fn begin_launch(
+		&mut self,
+		ctx: &eframe::egui::Context,
+		runtime: &tokio::runtime::Runtime,
+		view: &mut ui::MessagingUi,
+	) {
+		let catalog = match Catalog::embedded() {
+			Ok(catalog) => catalog,
+			Err(error) => {
+				view.dpi_bypass.status = format!("Каталог стратегий повреждён: {error}");
+				return;
+			}
+		};
+		let total = catalog.strategies.len() as u64;
+		let progress = Arc::new(AtomicU64::new(0));
+		let (send, receive) = mpsc::sync_channel(4);
+		let worker_progress = Arc::clone(&progress);
+		let ctx = ctx.clone();
+		view.dpi_bypass.busy = true;
+		view.dpi_bypass.progress = Some(0.0);
+		view.dpi_bypass.results.clear();
+		view.dpi_bypass.status = "Проверяю и запускаю обход DPI…".to_owned();
+		runtime.spawn_blocking(move || {
+			let outcome = launch(&catalog, &worker_progress);
+			let _ = send.send(outcome);
+			ctx.request_repaint();
+		});
+		self.job = Some(Job {
+			receiver: receive,
+			progress,
+			total,
+		});
+	}
+
+	/// Watches the elevated installer without spawning anything per frame: when
+	/// the helper process exits, the registration is verified on the worker.
+	fn poll_elevation(
+		&mut self,
+		ctx: &eframe::egui::Context,
+		runtime: &tokio::runtime::Runtime,
+		view: &mut ui::MessagingUi,
+	) {
+		let status = match self.elevating.as_mut() {
+			Some(child) => child.try_wait(),
+			None => return,
+		};
+		match status {
+			Ok(None) => ctx.request_repaint_after(Duration::from_millis(400)),
+			Ok(Some(_)) => {
+				self.elevating = None;
+				self.begin_install_check(ctx, runtime, view);
+			}
+			Err(_) => {
+				self.elevating = None;
+				self.install_failed = true;
+				view.dpi_bypass.busy = false;
+				view.dpi_bypass.status = "Установщик обхода не запустился.".to_owned();
+			}
+		}
+	}
+
+	fn begin_install_check(
+		&mut self,
+		ctx: &eframe::egui::Context,
+		runtime: &tokio::runtime::Runtime,
+		view: &mut ui::MessagingUi,
+	) {
+		let (send, receive) = mpsc::sync_channel(1);
+		let ctx = ctx.clone();
+		view.dpi_bypass.busy = true;
+		view.dpi_bypass.progress = None;
+		view.dpi_bypass.status = "Проверяю регистрацию задачи обхода…".to_owned();
+		runtime.spawn_blocking(move || {
+			let mut registered = false;
+			for _ in 0..INSTALL_TRIES {
+				// The runner is written before the task, so both must be there.
+				if task_registered() && state_dir().join("run.vbs").exists() {
+					registered = true;
+					break;
+				}
+				std::thread::sleep(INSTALL_STEP);
+			}
+			let _ = send.send(Outcome::Installed(registered));
+			ctx.request_repaint();
+		});
+		self.job = Some(Job {
+			receiver: receive,
+			progress: Arc::new(AtomicU64::new(0)),
+			total: 0,
+		});
 	}
 
 	fn begin_scan(
@@ -167,7 +331,7 @@ impl DpiBypass {
 		};
 		let total = catalog.strategies.len() as u64;
 		let progress = Arc::new(AtomicU64::new(0));
-		let (send, receive) = mpsc::sync_channel(1);
+		let (send, receive) = mpsc::sync_channel(4);
 		let worker_progress = Arc::clone(&progress);
 		let ctx = ctx.clone();
 		let test_all = !view.dpi_bypass.auto;
@@ -176,9 +340,8 @@ impl DpiBypass {
 		view.dpi_bypass.results.clear();
 		view.dpi_bypass.status = "Перебираю стратегии…".to_owned();
 		runtime.spawn_blocking(move || {
-			let result = scan(&catalog, &worker_progress, test_all)
-				.map_err(|error| format!("Обход: {error}"));
-			let _ = send.send(result);
+			let outcome = scan(&catalog, &worker_progress, test_all, false);
+			let _ = send.send(outcome);
 			ctx.request_repaint();
 		});
 		self.job = Some(Job {
@@ -210,8 +373,8 @@ impl DpiBypass {
 			"Отключаю обход…".to_owned()
 		};
 		runtime.spawn_blocking(move || {
-			let result = toggle(connect, &strategy).map_err(|error| format!("Обход: {error}"));
-			let _ = send.send(result);
+			let outcome = toggle(connect, &strategy);
+			let _ = send.send(outcome);
 			ctx.request_repaint();
 		});
 		self.job = Some(Job {
@@ -220,12 +383,87 @@ impl DpiBypass {
 			total: 0,
 		});
 	}
+
+	/// Spawns the elevated one-shot installer; the user only sees the UAC prompt.
+	fn raise_install(&mut self, ctx: &eframe::egui::Context, view: &mut ui::MessagingUi) {
+		let Ok(exe) = std::env::current_exe() else {
+			self.install_failed = true;
+			view.dpi_bypass.status = "Не удалось перезапустить установщик обхода.".to_owned();
+			return;
+		};
+		let inner = format!(
+			"Start-Process -FilePath '{}' -ArgumentList '--zapret-install-task' -Verb RunAs -WindowStyle Hidden",
+			exe.display()
+		);
+		let mut command = std::process::Command::new("powershell.exe");
+		#[cfg(windows)]
+		{
+			use std::os::windows::process::CommandExt;
+			command.creation_flags(0x0800_0000);
+		}
+		command.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &inner]);
+		match command.spawn() {
+			Ok(child) => {
+				self.elevating = Some(child);
+				// Keep the page's actions disabled until the registration is checked.
+				view.dpi_bypass.busy = true;
+				view.dpi_bypass.status =
+					"Подтверди запрос администратора — регистрирую обход…".to_owned();
+				ctx.request_repaint_after(Duration::from_millis(400));
+			}
+			Err(_) => {
+				self.install_failed = true;
+				view.dpi_bypass.status = "Не удалось запустить установщик обхода.".to_owned();
+			}
+		}
+	}
+}
+
+/// One launch decision plus, when it can be taken, the bypass itself.
+///
+/// The remembered strategy goes straight to `winws`: nothing is stopped that is
+/// not running and no sweep delays the first protected packet. The catalog is
+/// only walked when that strategy does not pass the probe.
+fn launch(catalog: &Catalog, progress: &AtomicU64) -> Outcome {
+	match policy(
+		winws_running(),
+		service_running(),
+		task_registered(),
+		state_dir().join("run.vbs").exists(),
+	) {
+		Launch::AlreadyUp => Outcome::AlreadyUp,
+		Launch::Install => Outcome::NeedsInstall,
+		Launch::Start => scan(catalog, progress, false, true),
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Launch {
+	AlreadyUp,
+	Install,
+	Start,
+}
+
+/// An already filtering bypass must never be replaced or re-installed, and a
+/// missing helper task must be registered before `winws` can start at all.
+fn policy(winws: bool, service: bool, task: bool, runner: bool) -> Launch {
+	if winws || service {
+		Launch::AlreadyUp
+	} else if !task || !runner {
+		Launch::Install
+	} else {
+		Launch::Start
+	}
 }
 
 /// Walks the catalog, applying each strategy in turn until Discord answers.
 /// In manual mode every strategy is tested so the page can list all results.
-fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool) -> Result<Outcome, String> {
-	let paths = paths().ok_or_else(|| "не найдена папка zapret рядом с клиентом".to_owned())?;
+/// `fresh` says nothing is filtering yet, so the first attempt skips the stop
+/// that would otherwise run the WMI-based stop task for no reason.
+fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool, fresh: bool) -> Outcome {
+	let Some(paths) = paths() else {
+		return Outcome::Failed("Обход: не найдена папка zapret рядом с клиентом".to_owned());
+	};
 	let mut results: Vec<(String, bool)> = Vec::with_capacity(catalog.strategies.len());
 	let mut alive = None;
 	// The strategy that worked last time goes first, so a healthy setup costs
@@ -234,24 +472,21 @@ fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool) -> Result<Outco
 	if let Some(saved) = read_state_file() {
 		order.sort_by_key(|strategy| strategy.id != saved);
 	}
+	let mut need_stop = !fresh;
 	for (index, strategy) in order.into_iter().enumerate() {
 		progress.store(index as u64, Ordering::Relaxed);
 		let args = render(strategy, &paths, None);
 		let mut works = false;
 		if write_runner(&args).is_ok() {
-			let _ = end_task();
+			if need_stop {
+				stop_winws();
+			}
+			need_stop = true;
 			if run_task().is_ok() {
-				let mut started = false;
-				for _ in 0..10 {
-					if winws_running() {
-						started = true;
-						break;
-					}
-					std::thread::sleep(Duration::from_millis(500));
-				}
+				let started = wait_for_winws();
 				if index == 0 && !started {
 					let _ = end_task();
-					return Err(
+					return Outcome::Failed(
 						"winws не запустился. Лог: %LOCALAPPDATA%\\serein-zapret\\winws.log"
 							.to_owned(),
 					);
@@ -259,13 +494,15 @@ fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool) -> Result<Outco
 				// Same idea as zapret's own targets.txt: a strategy counts as
 				// working only when the Discord endpoints actually answer.
 				let (ok, total) = zapret::probe::probe_discord(Duration::from_secs(4));
-				works = ok * 2 >= total;
+				works = started && ok * 2 >= total;
 			}
 		}
 		results.push((strategy.id.clone(), works));
 		if works && alive.is_none() {
 			alive = Some(strategy.id.clone());
-			write_state_file(&strategy.id)?;
+			if let Err(error) = write_state_file(&strategy.id) {
+				return Outcome::Failed(format!("Обход: {error}"));
+			}
 			if !test_all {
 				break;
 			}
@@ -276,32 +513,57 @@ fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool) -> Result<Outco
 	if alive.is_none() {
 		let _ = end_task();
 	}
-	Ok(Outcome::Scanned { alive, results })
+	Outcome::Scanned { alive, results }
 }
 
-fn toggle(connect: bool, strategy: &str) -> Result<Outcome, String> {
+fn toggle(connect: bool, strategy: &str) -> Outcome {
 	if !connect {
-		end_task()?;
-		return Ok(Outcome::Connected(false));
+		return match end_task() {
+			Ok(()) => Outcome::Connected(false),
+			Err(error) => Outcome::Failed(format!("Обход: {error}")),
+		};
 	}
-	let catalog = Catalog::embedded().map_err(|error| error.to_string())?;
-	let chosen = catalog
-		.strategy(strategy)
-		.or_else(|| catalog.strategy("general"))
-		.ok_or_else(|| "стратегия не найдена".to_owned())?;
-	let paths = paths().ok_or_else(|| "не найдена папка zapret рядом с клиентом".to_owned())?;
+	let catalog = match Catalog::embedded() {
+		Ok(catalog) => catalog,
+		Err(error) => return Outcome::Failed(format!("Обход: {error}")),
+	};
+	let (Some(chosen), Some(paths)) = (
+		catalog
+			.strategy(strategy)
+			.or_else(|| catalog.strategy("general")),
+		paths(),
+	) else {
+		return Outcome::Failed(
+			"Обход: стратегия или папка zapret рядом с клиентом не найдены".to_owned(),
+		);
+	};
 	let args = render(chosen, &paths, None);
-	write_runner(&args)?;
-	let _ = end_task();
-	run_task()?;
-	std::thread::sleep(Duration::from_secs(2));
-	if !winws_running() {
-		return Err(
+	if let Err(error) = write_runner(&args) {
+		return Outcome::Failed(format!("Обход: {error}"));
+	}
+	stop_winws();
+	if let Err(error) = run_task() {
+		return Outcome::Failed(format!("Обход: {error}"));
+	}
+	if !wait_for_winws() {
+		return Outcome::Failed(
 			"winws не запустился: проверь, зарегистрирована ли задача SereinZapret".to_owned(),
 		);
 	}
-	write_state_file(&chosen.id)?;
-	Ok(Outcome::Connected(true))
+	if let Err(error) = write_state_file(&chosen.id) {
+		return Outcome::Failed(format!("Обход: {error}"));
+	}
+	Outcome::Connected(true)
+}
+
+fn wait_for_winws() -> bool {
+	for _ in 0..WINWS_START_TRIES {
+		if winws_running() {
+			return true;
+		}
+		std::thread::sleep(WINWS_START_STEP);
+	}
+	false
 }
 
 fn install_dir() -> Option<PathBuf> {
@@ -396,6 +658,18 @@ fn end_task() -> Result<(), String> {
 	schtasks(&["/end", "/tn", TASK_NAME]).map(|_| ())
 }
 
+/// Stops whatever is filtering and waits for `winws` to leave, so the next
+/// strategy is not started into the delayed WMI killer of the stop task.
+fn stop_winws() {
+	let _ = end_task();
+	for _ in 0..STOP_TRIES {
+		if !winws_running() {
+			break;
+		}
+		std::thread::sleep(STOP_STEP);
+	}
+}
+
 /// True when `winws` is alive, whether it was started by our task, by an
 /// installed zapret service, or by hand. The image name is ASCII, so the
 /// localized console output does not matter.
@@ -413,28 +687,8 @@ fn task_registered() -> bool {
 	schtasks(&["/query", "/tn", TASK_NAME]).is_ok()
 }
 
-/// Spawns the elevated one-shot installer; the user only sees the UAC prompt.
-fn elevate_install() {
-	let Ok(exe) = std::env::current_exe() else {
-		return;
-	};
-	let inner = format!(
-		"Start-Process -FilePath '{}' -ArgumentList '--zapret-install-task' -Verb RunAs -WindowStyle Hidden",
-		exe.display()
-	);
-	let mut command = std::process::Command::new("powershell.exe");
-	#[cfg(windows)]
-	{
-		use std::os::windows::process::CommandExt;
-		command.creation_flags(0x0800_0000);
-	}
-	let _ = command
-		.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &inner])
-		.spawn();
-}
-
 /// Elevated entry point (`serein.exe --zapret-install-task`): writes the runner
-/// and registers the hidden SYSTEM task, so later launches never prompt.
+/// and registers the hidden task, so later launches never prompt.
 pub fn install_task() -> Result<(), String> {
 	let catalog = Catalog::embedded().map_err(|error| error.to_string())?;
 	let saved = read_state_file();
@@ -448,7 +702,6 @@ pub fn install_task() -> Result<(), String> {
 	write_runner(&args)?;
 	write_state_file(&strategy.id)?;
 
-	// `schtasks /sd` parses dates in the system locale (`12/31/2099` fails on a
 	// `schtasks /sd` parses dates in the system locale, so the date is left out:
 	// the one-shot trigger lands at the next midnight and never matters because
 	// the app starts the task on demand. `/ru` (unlike an XML principal) also
@@ -556,4 +809,20 @@ fn schtasks(args: &[&str]) -> Result<String, String> {
 #[allow(dead_code)]
 fn service_state() -> ServiceState {
 	Service::new(zapret::SERVICE_NAME).state()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn launch_policy_keeps_a_running_bypass_and_installs_before_starting() {
+		// Filtering already: never stop or re-install what is up.
+		assert_eq!(policy(true, false, false, false), Launch::AlreadyUp);
+		assert_eq!(policy(false, true, false, false), Launch::AlreadyUp);
+		// Without the helper task (or its runner) `winws` cannot start at all.
+		assert_eq!(policy(false, false, false, true), Launch::Install);
+		assert_eq!(policy(false, false, true, false), Launch::Install);
+		assert_eq!(policy(false, false, true, true), Launch::Start);
+	}
 }
