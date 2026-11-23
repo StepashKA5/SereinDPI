@@ -4216,7 +4216,7 @@ impl Desktop {
 					use model::Patch;
 					let channel = action.channel();
 					let patch = match action {
-						Action::Leave(_) => None,
+						Action::Leave(_) | Action::AddRecipient { .. } => None,
 						Action::Edit { name, icon, .. } => Some(model::ChannelPatch {
 							user_limit: Patch::Absent,
 							slowmode: Patch::Absent,
@@ -6734,6 +6734,7 @@ impl eframe::App for Desktop {
 			self.messaging.attachment_previews = self.uploads.previews();
 			self.messaging.attachment_files = self.uploads.files();
 			self.messaging.attachment_keys = self.uploads.selection_keys();
+			self.messaging.attachment_spoilers = self.uploads.spoilers();
 			self.messaging.stage_pending_upload(&ctx, &command);
 			if let Command::Send { channel, .. } = &command {
 				self.messaging.draft_changes.push(*channel);
@@ -6785,6 +6786,7 @@ impl eframe::App for Desktop {
 			self.messaging.attachment_previews = self.uploads.previews();
 			self.messaging.attachment_files = self.uploads.files();
 			self.messaging.attachment_keys = self.uploads.selection_keys();
+			self.messaging.attachment_spoilers = self.uploads.spoilers();
 		}
 		// Validate identity before any decode request after navigation or selection changes.
 		self.messaging.validate_attachment_view(&self.state);
@@ -7193,12 +7195,16 @@ impl eframe::App for Desktop {
 					self.messaging.external_upload.complete(Err(error));
 				}
 			}
+			for (key, spoiler) in std::mem::take(&mut self.messaging.attachment_spoiler_requests) {
+				self.uploads.set_spoiler(key, spoiler);
+			}
 			if let Some(index) = self.messaging.remove_attachment_index.take() {
 				self.uploads.remove_at(index);
 				if self.state.demo {
 					self.messaging.attachment = None;
 					self.messaging.attachment_files.clear();
 					self.messaging.attachment_previews.clear();
+					self.messaging.attachment_spoilers.clear();
 				}
 			}
 			if std::mem::take(&mut self.messaging.remove_attachment_requested) {
@@ -7206,6 +7212,7 @@ impl eframe::App for Desktop {
 				self.messaging.attachment = None;
 				self.messaging.attachment_files.clear();
 				self.messaging.attachment_previews.clear();
+				self.messaging.attachment_spoilers.clear();
 			}
 			if std::mem::take(&mut self.messaging.cancel_upload_requested) {
 				// The timeline row cancels its own upload, not files loading for the next message.
