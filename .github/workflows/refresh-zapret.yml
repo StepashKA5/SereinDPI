@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 # The upstream merge, the zapret refresh and their pushes all target main; run
 # them one at a time so a push can never race another workflow's push.
@@ -49,6 +48,25 @@ jobs:
           Copy-Item "$env:ZAPRET_DIR\bin\*" "$target\bin" -Recurse -Force
           Copy-Item "$env:ZAPRET_DIR\lists\*.txt" "$target\lists" -Force
 
+          # winws dies on a missing ipset file, and the catalog references the
+          # empty user lists in every strategy. Flowseal stopped shipping them
+          # (their launcher creates them), so recreate them before shipping.
+          $catalog = Get-Content 'crates\zapret\data\strategies.json' -Raw | ConvertFrom-Json
+          $refs = foreach ($strategy in $catalog.strategies) {
+            foreach ($arg in $strategy.args) {
+              if ($arg -match '\{(bin|lists)\}(.+)$') {
+                [pscustomobject]@{ Kind = $Matches[1]; Name = $Matches[2] }
+              }
+            }
+          }
+          foreach ($ref in ($refs | Sort-Object Kind, Name -Unique)) {
+            $path = Join-Path "$target\$($ref.Kind)" $ref.Name
+            if ($ref.Kind -eq 'lists' -and $ref.Name -match '-user\.txt$') {
+              if (-not (Test-Path $path)) { New-Item -ItemType File -Path $path | Out-Null }
+            }
+            if (-not (Test-Path $path)) { throw "strategies.json references a missing $($ref.Kind) file: $($ref.Name)" }
+          }
+
       - name: Commit changes
         id: commit
         shell: pwsh
@@ -65,12 +83,9 @@ jobs:
           git commit -m "chore(zapret): refresh bundle from Flowseal"
           "changed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      # Pushes made with GITHUB_TOKEN do not start other workflows.
-      - name: Push and build
+      # Pushes made with GITHUB_TOKEN start no workflow and cannot dispatch one
+      # either, so the build is triggered by this run finishing instead.
+      - name: Push
         if: steps.commit.outputs.changed == 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git push
-          gh workflow run fork-build.yml --ref main
+        run: git push

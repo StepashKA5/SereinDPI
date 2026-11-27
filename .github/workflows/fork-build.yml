@@ -9,7 +9,7 @@ on:
   # event GitHub does deliver, so the build hangs off it and skips itself
   # when main has nothing newer than the last release tag.
   workflow_run:
-    workflows: ['Sync upstream']
+    workflows: ['Sync upstream', 'Refresh zapret']
     types: [completed]
   workflow_dispatch:
 
