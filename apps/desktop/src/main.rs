@@ -1102,6 +1102,9 @@ struct Desktop {
 	native: native_login::NativeLogin,
 	captcha: captcha::Captcha,
 	connection: Option<connection::Connection>,
+	/// When the saved-login connection started, so a gateway that stops answering
+	/// ends on the welcome screen instead of an endless launch bar.
+	restore_started: Option<std::time::Instant>,
 	state: State,
 	messaging: ui::MessagingUi,
 	/// Last invite counter a local Rich Presence client published, so it opens exactly once.
@@ -2714,6 +2717,7 @@ impl Desktop {
 			native,
 			captcha: captcha::Captcha::default(),
 			connection: None,
+			restore_started: None,
 			state,
 			messaging,
 			rpc_invite_seen: 0,
@@ -6323,6 +6327,7 @@ impl eframe::App for Desktop {
 			&mut self.messaging,
 			self.fixture_only || self.state.demo,
 		);
+		self.watch_restore(ctx);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
 		#[cfg(feature = "demo")]

@@ -78,6 +78,7 @@ impl Desktop {
 		self.messaging.own_presence_changed = false;
 		self.messaging.draft_restore_pending = false;
 		self.state.auth = AuthState::Authenticating;
+		self.restore_started = Some(std::time::Instant::now());
 		self.state.status = "Connecting to Discord…";
 		self.state.failure_detail = None;
 		let secret = Arc::new(secret);
@@ -354,6 +355,31 @@ impl Desktop {
 		self.connection
 			.is_some()
 			.then(|| ui::i18n::translate("main-restoring-connecting-to-discord"))
+	}
+	/// A saved login whose gateway connection stops answering keeps the launch
+	/// screen up with no way out. The session layer retries, but nothing tells the
+	/// user it gave up, so the bar just sits there. After a minute on the same
+	/// connection the login is ended and the welcome screen explains why.
+	pub(super) fn watch_restore(&mut self, ctx: &egui::Context) {
+		if self.state.auth != AuthState::Authenticating || self.connection.is_none() {
+			self.restore_started = None;
+			return;
+		}
+		let started = self
+			.restore_started
+			.get_or_insert_with(std::time::Instant::now);
+		if started.elapsed() < std::time::Duration::from_secs(60) {
+			ctx.request_repaint_after(std::time::Duration::from_secs(1));
+			return;
+		}
+		self.restore_started = None;
+		self.connection = None;
+		self.state.auth = AuthState::Failed;
+		self.state.status = "Discord did not answer the login";
+		self.state.failure_detail = Some(
+			"The saved login opened a connection but never reached READY. Sign in again; if it repeats, check the connection."
+				.into(),
+		);
 	}
 	/// Restore screen for returning accounts: no sign-in controls, just the stage,
 	/// an indeterminate bar and a way out to the welcome screen.
