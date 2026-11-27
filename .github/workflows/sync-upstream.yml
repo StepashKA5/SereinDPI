@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 # The upstream merge, the zapret refresh and their pushes all target main; run
 # them one at a time so a push can never race another workflow's push.
@@ -38,11 +37,8 @@ jobs:
           git fetch --no-tags upstream main
           python3 tools/fork-sync.py
 
-      # Pushes made with GITHUB_TOKEN do not start other workflows.
-      - name: Push and build
+      # Pushes made with GITHUB_TOKEN start no workflow and cannot dispatch one
+      # either, so the build is triggered by this run finishing instead.
+      - name: Push
         if: steps.merge.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git push origin HEAD:main
-          gh workflow run fork-build.yml --ref main
+        run: git push origin HEAD:main

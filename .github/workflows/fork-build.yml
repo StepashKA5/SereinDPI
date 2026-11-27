@@ -4,6 +4,13 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
+  # A push made with GITHUB_TOKEN starts no workflow, and the sync workflow
+  # cannot dispatch one with that token either. Finishing the sync is the
+  # event GitHub does deliver, so the build hangs off it and skips itself
+  # when main has nothing newer than the last release tag.
+  workflow_run:
+    workflows: ['Sync upstream']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +21,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changed:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.diff.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v1.*')
+          commits=$(git rev-list "$last"..HEAD --count)
+          echo "$commits commit(s) since $last"
+          echo "build=$([ "$commits" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   windows:
+    needs: changed
+    if: always() && (github.event_name != 'workflow_run' || needs.changed.outputs.build == 'true')
     runs-on: windows-latest
     timeout-minutes: 120
     env:
