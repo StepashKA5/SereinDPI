@@ -486,10 +486,7 @@ fn scan(catalog: &Catalog, progress: &AtomicU64, test_all: bool, fresh: bool) ->
 				let started = wait_for_winws();
 				if index == 0 && !started {
 					let _ = end_task();
-					return Outcome::Failed(
-						"winws не запустился. Лог: %LOCALAPPDATA%\\serein-zapret\\winws.log"
-							.to_owned(),
-					);
+					return Outcome::Failed(failure_detail());
 				}
 				// Same idea as zapret's own targets.txt: a strategy counts as
 				// working only when the Discord endpoints actually answer.
@@ -546,9 +543,7 @@ fn toggle(connect: bool, strategy: &str) -> Outcome {
 		return Outcome::Failed(format!("Обход: {error}"));
 	}
 	if !wait_for_winws() {
-		return Outcome::Failed(
-			"winws не запустился: проверь, зарегистрирована ли задача SereinZapret".to_owned(),
-		);
+		return Outcome::Failed(failure_detail());
 	}
 	if let Err(error) = write_state_file(&chosen.id) {
 		return Outcome::Failed(format!("Обход: {error}"));
@@ -597,27 +592,91 @@ fn write_runner(args: &[String]) -> Result<(), String> {
 	let paths = paths().ok_or_else(|| "не найдена папка zapret рядом с клиентом".to_owned())?;
 	let dir = state_dir();
 	std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-	let quote = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
-	let line = args
-		.iter()
+	ensure_lists(args, &paths.lists)?;
+	let log = dir.join("winws.log");
+	let script = run_script(&paths.bin, &paths.bin.join("winws.exe"), args, &log);
+	write_utf16(&dir.join("run.vbs"), &script)?;
+	write_stop_script(&dir)
+}
+
+/// `winws` exits when a list file it was told to load is missing, and the
+/// catalog references Flowseal's empty `-user.txt` files that their launcher
+/// creates rather than shipping in the zip. An absent override list means "no
+/// user additions", so create it empty instead of failing the whole strategy.
+fn ensure_lists(args: &[String], lists: &Path) -> Result<(), String> {
+	const FLAGS: [&str; 4] = [
+		"--hostlist=",
+		"--hostlist-exclude=",
+		"--ipset=",
+		"--ipset-exclude=",
+	];
+	for arg in args {
+		let Some(value) = FLAGS.iter().find_map(|flag| arg.strip_prefix(flag)) else {
+			continue;
+		};
+		let path = Path::new(value);
+		if path.parent() != Some(lists) || path.exists() {
+			continue;
+		}
+		std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+	}
+	Ok(())
+}
+
+/// Arguments joined into one command line, with anything containing a space
+/// quoted so `C:\Program Files` survives.
+fn quote_args(args: &[String]) -> String {
+	args.iter()
 		.map(|arg| {
 			if arg.contains(' ') {
-				quote(arg)
+				format!("\"{arg}\"")
 			} else {
 				arg.clone()
 			}
 		})
 		.collect::<Vec<_>>()
-		.join(" ");
-	// `wscript.exe` is a GUI process: it never allocates a console, so no
-	// PowerShell/cmd window flashes when the task starts.
-	let script = format!(
-		"Dim sh\r\nSet sh = CreateObject(\"WScript.Shell\")\r\nsh.CurrentDirectory = {bin}\r\nsh.Run {cmd}, 0, False\r\n",
-		bin = quote(&paths.bin.display().to_string()),
-		cmd = quote(&format!("{} {line}", paths.bin.join("winws.exe").display())),
+		.join(" ")
+}
+
+/// A VBScript string literal; an embedded quote is written twice.
+fn vbs_string(value: &str) -> String {
+	format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// The runner script itself, kept separate so the quoting can be tested.
+///
+/// `wscript.exe` is a GUI process: it never allocates a console, so nothing
+/// flashes when the task starts. The command goes through `cmd.exe` because
+/// `sh.Run` hands its line straight to CreateProcess - a bare `>` there would
+/// be passed to `winws` as an argument and the launch log would never exist.
+fn run_script(bin: &Path, winws: &Path, args: &[String], log: &Path) -> String {
+	let command = format!(
+		"cmd.exe /c \"\"{}\" {} > \"{}\" 2>&1\"",
+		winws.display(),
+		quote_args(args),
+		log.display()
 	);
-	write_utf16(&dir.join("run.vbs"), &script)?;
-	write_stop_script(&dir)
+	format!(
+		"Dim sh\r\nSet sh = CreateObject(\"WScript.Shell\")\r\nsh.CurrentDirectory = {bin}\r\nsh.Run {cmd}, 0, False\r\n",
+		bin = vbs_string(&bin.display().to_string()),
+		cmd = vbs_string(&command),
+	)
+}
+
+/// Last line `winws` wrote, so a start failure explains itself instead of
+/// pointing at a log the user has to open by hand.
+fn failure_detail() -> String {
+	let path = state_dir().join("winws.log");
+	std::fs::read_to_string(&path)
+		.ok()
+		.and_then(|text| {
+			text.lines()
+				.rev()
+				.find(|line| !line.trim().is_empty())
+				.map(str::to_owned)
+		})
+		.map(|line| format!("winws не запустился: {line}"))
+		.unwrap_or_else(|| format!("winws не запустился. Лог: {}", path.display()))
 }
 
 /// Silent `winws` killer used by the stop task.
@@ -824,5 +883,75 @@ mod tests {
 		assert_eq!(policy(false, false, false, true), Launch::Install);
 		assert_eq!(policy(false, false, true, false), Launch::Install);
 		assert_eq!(policy(false, false, true, true), Launch::Start);
+	}
+
+	fn scratch(name: &str) -> PathBuf {
+		let dir = std::env::temp_dir().join(format!("serein-test-{name}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).expect("scratch dir");
+		dir
+	}
+
+	#[test]
+	fn absent_override_lists_are_created_empty() {
+		// winws exits on an ipset it cannot open, and the bundle has not shipped
+		// the `-user.txt` overrides since Flowseal moved them into their launcher.
+		let root = scratch("lists");
+		let lists = root.join("lists");
+		let user = lists.join("ipset-exclude-user.txt");
+		let existing = lists.join("list-exclude.txt");
+		let args = vec![
+			format!("--ipset-exclude={}", user.display()),
+			format!("--hostlist-exclude={}", existing.display()),
+			"--wf-tcp=80,443".to_owned(),
+		];
+		std::fs::write(&existing, "example.com\n").expect("existing list");
+		let _ = std::fs::remove_file(&user);
+
+		ensure_lists(&args, &lists).expect("lists ensured");
+
+		assert!(user.exists(), "missing override list was not created");
+		assert_eq!(
+			std::fs::read_to_string(&user).expect("created list"),
+			"",
+			"created list must stay empty"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&existing).expect("existing list"),
+			"example.com\n",
+			"an existing list must not be truncated"
+		);
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn runner_redirects_winws_output_to_the_log() {
+		// sh.Run hands the line to CreateProcess, so a bare `>` would reach
+		// winws as an argument and the launch log would stay a lie.
+		let script = run_script(
+			Path::new(r"C:\app\zapret\bin"),
+			Path::new(r"C:\app\zapret\bin\winws.exe"),
+			&[
+				"--wf-tcp=80,443".to_owned(),
+				"--hostlist=C:\\a b\\list.txt".to_owned(),
+			],
+			Path::new(r"C:\state\winws.log"),
+		);
+		// An arg with a space keeps its quotes, and every quote is doubled for
+		// the VBS string literal.
+		assert!(
+			script.contains(
+				r#"--wf-tcp=80,443 ""--hostlist=C:\a b\list.txt"" > ""C:\state\winws.log"" 2>&1"#
+			),
+			"quoting or redirect lost: {script}"
+		);
+		assert!(
+			script.ends_with("\"\", 0, False\r\n"),
+			"hidden window or line ending lost: {script}"
+		);
+		assert!(
+			script.contains("sh.Run \"cmd.exe /c "),
+			"sh.Run must go through cmd.exe: {script}"
+		);
 	}
 }
