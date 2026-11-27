@@ -99,7 +99,13 @@ Synthetic `SendInput` drags on Windows 11 are measured in `docs/performance.md`;
 behavior on other machines and native macOS/Linux window movement remain unverified.
 On Windows and macOS, General settings can hide this 36 px strip and use the native title bar
 and window buttons instead. The device preference defaults to showing the custom strip and
-is saved with other app preferences; older saved settings keep that default. macOS switches
+is saved with other app preferences; older saved settings keep that default. When Windows runs
+on an Intel OpenGL adapter, Serein automatically uses the native Windows title bar and locks
+the switch on for that session without overwriting the saved preference: legacy Intel WGL
+drivers (such as Intel HD Graphics 4600) offset undecorated `WM_NCCALCSIZE` surfaces by the
+standard non-client frame insets, clipping the bottom-right edges and misaligning clicks.
+Offline tests and the Windows synthetic fixture cover this path; physical Intel HD Graphics
+4600 validation remains pending. macOS switches
 without restarting and keeps its native traffic lights. Linux always omits the app strip and
 defaults to system decorations; on Wayland compositors without server decorations, including GNOME,
 winit uses its Adwaita frame instead of the basic fallback. GNOME rendering remains unverified
@@ -236,7 +242,7 @@ verification on the affected system.
 
 `cargo xtask package` stages the standard release including voice under `dist` (`dist/Serein.app` on macOS). The macOS bundle includes its microphone-use description; actual microphone permission, capture/playback, device switching and sleep/resume have not been exercised. Windows x64 voice release packaging and synthetic protocol/audio tests pass; physical audio and live calls remain unverified on Windows. Linux x64 text/voice release builds and Debian package smoke passed on Ubuntu 26.04 under WSL2; native Linux desktop/audio runtime remains unverified. CMake is a source-build dependency, not a runtime voice service.
 
-Device choices, voice keybinds and the owner's mute/deafen intent are device-local. Mute and deafen can be changed while idle, survive restart and apply to the first voice-state packet when the next call is joined. Voice bindings with a modifier use native global registration on supported Windows/macOS/Linux X11 setups and the desktop GlobalShortcuts portal on Wayland. Like Discord, single keys (V by default for Push to Talk), numpad keys and mouse buttons are not registered: on Windows, macOS and X11 a background thread reads the physical key state every 10 ms during a call (30 ms otherwise), so the key still reaches the focused app. It runs only while such a binding exists, watches keyboard keys only while another app is focused, and watches Push to Talk only in push-to-talk mode. macOS asks for Input Monitoring when a push-to-talk call starts, as Discord does (unverified on hardware). On Wayland, single keys stay focused-only. Known limits: on macOS a watched letter is the key at its US position, so it differs from what a non-US layout types there; a modified keypad digit registers as the top-row digit; Windows reading keys while an elevated app is focused is unverified. Missing/denied portal access and unavailable/conflicting registrations fall back to focused input. Use headphones because there is no acoustic echo cancellation. No signing, desktop integration, physical audio or live-compatibility claim follows from compilation alone.
+Device choices, voice keybinds and the owner's mute/deafen intent are device-local. Mute and deafen can be changed while idle, survive restart and apply to the first voice-state packet when the next call is joined. Voice bindings with a modifier use native global registration on supported Windows/macOS/Linux X11 setups and the desktop GlobalShortcuts portal on Wayland. Like Discord, single keys (V by default for Push to Talk), numpad keys and mouse buttons are not registered: on Windows, macOS and X11 a background thread reads the physical key state every 10 ms during a call (30 ms otherwise), so the key still reaches the focused app. It runs only while such a binding exists, watches keyboard keys only while another app is focused, and watches Push to Talk only in push-to-talk mode. Voice actions can also use a lone Left or Right Ctrl, Shift or Alt (Option on macOS); the same thread watches it even while Serein is focused, because focused shortcuts never match a modifier on its own, so it needs global keybinds enabled and is unavailable on Wayland (unverified on macOS and X11 hardware). On Windows the Left Ctrl that AltGr reports is ignored. macOS asks for Input Monitoring when a push-to-talk call starts, as Discord does (unverified on hardware). On Wayland, single keys stay focused-only. Known limits: on macOS a watched letter is the key at its US position, so it differs from what a non-US layout types there; a modified keypad digit registers as the top-row digit; Windows reading keys while an elevated app is focused is unverified. Missing/denied portal access and unavailable/conflicting registrations fall back to focused input. Use headphones because there is no acoustic echo cancellation. No signing, desktop integration, physical audio or live-compatibility claim follows from compilation alone.
 
 Wayland shortcut requests use the [XDG shortcut specification](https://specifications.freedesktop.org/shortcuts/latest/)
 and XKB keysyms (for example `CTRL+SHIFT+m`, `CTRL+1`, and `CTRL+Down`),
@@ -301,6 +307,9 @@ on-by-default minimize-to-tray preference. The preference controls window Close:
 when enabled and registration is available, Close hides the window; otherwise
 Close follows ordinary exit checks. Turning the preference off or losing the
 tray host restores a hidden window. Normal taskbar/Dock minimizing is unchanged.
+On native Wayland under niri or Sway, which have no minimize and no hiding IPC Serein uses,
+Close exits through the same checks instead and the custom title bar has no Minimize button
+(user-reported on niri; no niri or Sway session has verified the fix).
 Show restores the window, and Quit follows the existing unsaved-work and download
 checks.
 
