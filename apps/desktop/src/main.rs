@@ -1105,6 +1105,9 @@ struct Desktop {
 	/// When the saved-login connection started, so a gateway that stops answering
 	/// ends on the welcome screen instead of an endless launch bar.
 	restore_started: Option<std::time::Instant>,
+	/// Failed saved-login attempts since the last success, bounded by
+	/// `sign_in::RESTORE_RETRIES`.
+	restore_retries: u8,
 	state: State,
 	messaging: ui::MessagingUi,
 	/// Last invite counter a local Rich Presence client published, so it opens exactly once.
@@ -2718,6 +2721,7 @@ impl Desktop {
 			captcha: captcha::Captcha::default(),
 			connection: None,
 			restore_started: None,
+			restore_retries: 0,
 			state,
 			messaging,
 			rpc_invite_seen: 0,

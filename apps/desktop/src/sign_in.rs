@@ -10,6 +10,11 @@ pub(super) const SIGN_IN_HEADER_HEIGHT: f32 = if cfg!(target_os = "windows") {
 
 /// How long a saved-login message stays on the sign-in screen.
 const NOTICE_SECONDS: f64 = 8.0;
+/// How long one saved-login attempt may stay on the launch screen before the
+/// next one replaces it.
+const RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Extra attempts after the first, then the welcome screen explains the failure.
+const RESTORE_RETRIES: u8 = 2;
 /// Padding inside the sign-in card.
 const CARD_PADDING: f32 = 32.0;
 /// The card with the QR code beside the form: both columns, the gap between them and the
@@ -358,28 +363,42 @@ impl Desktop {
 	}
 	/// A saved login whose gateway connection stops answering keeps the launch
 	/// screen up with no way out. The session layer retries, but nothing tells the
-	/// user it gave up, so the bar just sits there. After a minute on the same
-	/// connection the login is ended and the welcome screen explains why.
+	/// user it gave up, so the bar just sits there. Each attempt gets
+	/// [`RESTORE_TIMEOUT`]; once [`RESTORE_RETRIES`] more are spent the welcome
+	/// screen explains why instead of spinning forever.
 	pub(super) fn watch_restore(&mut self, ctx: &egui::Context) {
-		if self.state.auth != AuthState::Authenticating || self.connection.is_none() {
+		// A native sign-in owns the window and its own status.
+		if self.state.auth != AuthState::Authenticating || self.login.is_some() {
 			self.restore_started = None;
+			self.restore_retries = 0;
 			return;
 		}
 		let started = self
 			.restore_started
 			.get_or_insert_with(std::time::Instant::now);
-		if started.elapsed() < std::time::Duration::from_secs(60) {
+		if started.elapsed() < RESTORE_TIMEOUT {
 			ctx.request_repaint_after(std::time::Duration::from_secs(1));
 			return;
 		}
 		self.restore_started = None;
 		self.connection = None;
-		self.state.auth = AuthState::Failed;
-		self.state.status = "Discord did not answer the login";
-		self.state.failure_detail = Some(
-			"The saved login opened a connection but never reached READY. Sign in again; if it repeats, check the connection."
-				.into(),
-		);
+		let retry = self
+			.pending_account_save
+			.clone()
+			.filter(|_| self.restore_retries < RESTORE_RETRIES);
+		let Some(secret) = retry else {
+			self.restore_retries = 0;
+			self.state.auth = AuthState::Failed;
+			self.state.status = "Discord did not answer the login";
+			self.state.failure_detail = Some(
+				"Every gateway connection opened for the saved login stalled before READY. Sign in again; if it repeats, check the connection."
+					.into(),
+			);
+			return;
+		};
+		self.restore_retries += 1;
+		let save = self.pending_save.is_some();
+		self.connect((*secret).clone(), save, ctx);
 	}
 	/// Restore screen for returning accounts: no sign-in controls, just the stage,
 	/// an indeterminate bar and a way out to the welcome screen.
